@@ -1,26 +1,27 @@
 // ==UserScript==
-// @name         LALAL.AI Streaming Stem ZIP Downloader
+// @name         LALAL.AI Stem ZIP Downloader
 // @namespace    extract-lalal-segments
-// @version      1.5.0
+// @version      1.7.0
 // @match        https://lalal.ai/*
 // @match        https://www.lalal.ai/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
-// @grant        unsafeWindow
+// @grant        GM_notification
 // @connect      d.lalal.ai
-// @require      https://cdn.jsdelivr.net/npm/@zip.js/zip.js@2.7.54/dist/zip.min.js
+// @require      https://cdn.jsdelivr.net/npm/@zip.js/zip.js@2.7.54/dist/zip-full.min.js
 // ==/UserScript==
 
 (() => {
   "use strict";
 
-  const segmentRegex = /^https:\/\/d\.lalal\.ai\/media\/split\/([^/]+)\/([^/]+)\/([^/]+)\/segment-(\d+)\.mp3([?#].*)?$/i;
+  const segmentRegex =
+    /^https:\/\/d\.lalal\.ai\/media\/split\/([^/]+)\/([^/]+)\/([^/]+)\/segment-(\d+)\.mp3([?#].*)?$/i;
   const stemsByType = new Map();
 
   let panel;
   let statusLine;
   let stemList;
-  let downloadButton;
+  let startButton;
   let clearButton;
   let isDownloading = false;
 
@@ -29,6 +30,7 @@
   }
 
   function setStatus(text) {
+    console.log("[LALAL ZIP]", text);
     if (statusLine) statusLine.textContent = text;
   }
 
@@ -39,13 +41,14 @@
     panel.style.position = "fixed";
     panel.style.right = "16px";
     panel.style.bottom = "16px";
-    panel.style.zIndex = "999999";
-    panel.style.width = "360px";
+    panel.style.zIndex = "2147483647";
+    panel.style.width = "370px";
     panel.style.padding = "12px";
     panel.style.borderRadius = "12px";
     panel.style.background = "#111";
     panel.style.color = "#fff";
-    panel.style.font = "13px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+    panel.style.font =
+      "13px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
     panel.style.boxShadow = "0 8px 30px rgba(0,0,0,.35)";
 
     const title = document.createElement("div");
@@ -65,21 +68,22 @@
     stemList.style.borderRadius = "8px";
     stemList.style.background = "#222";
     stemList.style.color = "#fff";
-    stemList.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
-    stemList.style.maxHeight = "150px";
+    stemList.style.font =
+      "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+    stemList.style.maxHeight = "160px";
     stemList.style.overflow = "auto";
     stemList.style.whiteSpace = "pre-wrap";
 
-    downloadButton = document.createElement("button");
-    downloadButton.textContent = "Start downloading ZIP";
-    downloadButton.disabled = true;
-    downloadButton.style.width = "100%";
-    downloadButton.style.border = "0";
-    downloadButton.style.borderRadius = "8px";
-    downloadButton.style.padding = "8px 10px";
-    downloadButton.style.cursor = "pointer";
-    downloadButton.style.fontWeight = "700";
-    downloadButton.style.marginBottom = "8px";
+    startButton = document.createElement("button");
+    startButton.textContent = "Start ZIP download";
+    startButton.disabled = true;
+    startButton.style.width = "100%";
+    startButton.style.border = "0";
+    startButton.style.borderRadius = "8px";
+    startButton.style.padding = "8px 10px";
+    startButton.style.cursor = "pointer";
+    startButton.style.fontWeight = "700";
+    startButton.style.marginBottom = "8px";
 
     clearButton = document.createElement("button");
     clearButton.textContent = "Clear detected stems";
@@ -90,27 +94,38 @@
     clearButton.style.cursor = "pointer";
     clearButton.style.fontWeight = "700";
 
-    downloadButton.addEventListener("click", startDownload);
+    startButton.addEventListener("click", () => {
+      startDownload();
+    });
+
     clearButton.addEventListener("click", () => {
       if (isDownloading) return;
       stemsByType.clear();
       updatePanel();
+      setStatus("Cleared detected stems.");
     });
 
-    panel.append(title, statusLine, stemList, downloadButton, clearButton);
+    panel.append(title, statusLine, stemList, startButton, clearButton);
     document.body.appendChild(panel);
   }
 
   function updatePanel() {
     ensurePanel();
 
-    const stems = [...stemsByType.values()].sort((a, b) => a.type.localeCompare(b.type));
+    const stems = [...stemsByType.values()].sort((a, b) =>
+      a.type.localeCompare(b.type),
+    );
 
     stemList.textContent = stems.length
-      ? stems.map((stem) => `${stem.type} — seen: ${[...stem.seenNumbers].sort((a, b) => a - b).join(", ")}`).join("\n")
+      ? stems
+          .map(
+            (stem) =>
+              `${stem.type} — seen: ${[...stem.seenNumbers].sort((a, b) => a - b).join(", ")}`,
+          )
+          .join("\n")
       : "No matching stems detected yet.";
 
-    downloadButton.disabled = isDownloading || stems.length === 0;
+    startButton.disabled = isDownloading || stems.length === 0;
     clearButton.disabled = isDownloading;
 
     if (!isDownloading) {
@@ -138,16 +153,13 @@
         type,
         suffix,
         width: rawNumber.length,
-        seenNumbers: new Set([number])
+        seenNumbers: new Set([number]),
       });
     } else {
-      const existing = stemsByType.get(type);
-      existing.seenNumbers.add(number);
-      existing.width = Math.max(existing.width, rawNumber.length);
-
-      if (!existing.suffix && suffix) {
-        existing.suffix = suffix;
-      }
+      const stem = stemsByType.get(type);
+      stem.seenNumbers.add(number);
+      stem.width = Math.max(stem.width, rawNumber.length);
+      if (!stem.suffix && suffix) stem.suffix = suffix;
     }
 
     updatePanel();
@@ -159,19 +171,22 @@
         method: "GET",
         url,
         responseType: "arraybuffer",
-        timeout: 30000,
-        onload: (response) => resolve({
-          status: response.status,
-          body: response.response
-        }),
-        onerror: () => resolve({
-          status: 0,
-          body: null
-        }),
-        ontimeout: () => resolve({
-          status: 0,
-          body: null
-        })
+        timeout: 60000,
+        onload: (response) =>
+          resolve({
+            status: response.status,
+            body: response.response,
+          }),
+        onerror: () =>
+          resolve({
+            status: 0,
+            body: null,
+          }),
+        ontimeout: () =>
+          resolve({
+            status: 0,
+            body: null,
+          }),
       });
     });
   }
@@ -182,20 +197,20 @@
   }
 
   async function findStartSegment(stem) {
-    const candidates = [
-      0,
-      1,
-      ...[...stem.seenNumbers].sort((a, b) => a - b)
-    ];
+    const candidates = [0, 1, ...[...stem.seenNumbers].sort((a, b) => a - b)];
 
     for (const index of [...new Set(candidates)]) {
       const url = makeSegmentUrl(stem, index);
+      setStatus(
+        `Testing ${safeName(stem.type)} segment-${String(index).padStart(stem.width, "0")}.mp3`,
+      );
+
       const response = await requestArrayBuffer(url);
 
-      if (response.status === 200) {
+      if (response.status === 200 && response.body) {
         return {
           index,
-          body: response.body
+          body: response.body,
         };
       }
     }
@@ -203,67 +218,12 @@
     return null;
   }
 
-  async function createZipWriter(suggestedName) {
-    const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
-
-    if (pageWindow.showSaveFilePicker && zip.WritableStreamWriter) {
-      const handle = await pageWindow.showSaveFilePicker({
-        suggestedName,
-        types: [
-          {
-            description: "ZIP file",
-            accept: {
-              "application/zip": [".zip"]
-            }
-          }
-        ]
-      });
-
-      const writable = await handle.createWritable();
-
-      return {
-        writer: new zip.ZipWriter(new zip.WritableStreamWriter(writable), {
-          level: 0,
-          bufferedWrite: true
-        }),
-        async close() {
-          await this.writer.close();
-          await writable.close();
-        },
-        mode: "stream"
-      };
-    }
-
-    const blobWriter = new zip.BlobWriter("application/zip");
-
-    return {
-      writer: new zip.ZipWriter(blobWriter, {
-        level: 0
-      }),
-      async close() {
-        const blob = await this.writer.close();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-
-        link.href = url;
-        link.download = suggestedName;
-        link.style.display = "none";
-
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-
-        setTimeout(() => URL.revokeObjectURL(url), 30000);
-      },
-      mode: "blob"
-    };
-  }
-
-  async function addStemToZip(zipWriter, stem) {
+  async function addStemToZip(zipWriter, stem, ZipLib) {
     const folderName = safeName(stem.type);
     const start = await findStartSegment(stem);
 
     if (!start) {
+      setStatus(`Skipping ${folderName}: no valid start segment.`);
       return 0;
     }
 
@@ -276,34 +236,76 @@
 
       setStatus(`Downloading ${folderName}/segment-${number}.mp3`);
 
-      const response = count === 0
-        ? { status: 200, body: start.body }
-        : await requestArrayBuffer(url);
+      const response =
+        count === 0
+          ? { status: 200, body: start.body }
+          : await requestArrayBuffer(url);
 
-      if (response.status !== 200) {
+      if (response.status !== 200 || !response.body) {
+        setStatus(`Finished ${folderName}: ${count} segment(s).`);
         return count;
       }
 
+      const blob = new Blob([response.body], {
+        type: "audio/mpeg",
+      });
+
       await zipWriter.add(
         `${folderName}/segment-${number}.mp3`,
-        new zip.Uint8ArrayReader(new Uint8Array(response.body)),
+        new ZipLib.BlobReader(blob),
         {
-          level: 0
-        }
+          level: 0,
+        },
       );
 
       count += 1;
       index += 1;
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
+  }
+
+  function saveBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    link.style.display = "none";
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
   async function startDownload() {
     if (isDownloading) return;
 
-    const stems = [...stemsByType.values()].sort((a, b) => a.type.localeCompare(b.type));
+    ensurePanel();
+    setStatus("Start button pressed.");
+
+    const ZipLib = globalThis.zip;
+
+    if (
+      !ZipLib ||
+      !ZipLib.ZipWriter ||
+      !ZipLib.BlobWriter ||
+      !ZipLib.BlobReader
+    ) {
+      setStatus("zip.js did not load. Refresh the page and try again.");
+      return;
+    }
+
+    const stems = [...stemsByType.values()].sort((a, b) =>
+      a.type.localeCompare(b.type),
+    );
 
     if (stems.length === 0) {
-      setStatus("No matching stems detected yet.");
+      setStatus(
+        "No matching stems detected yet. Play/preview the stems first.",
+      );
       return;
     }
 
@@ -312,23 +314,42 @@
 
     try {
       const firstStem = stems[0];
-      const zipName = `lalal-${safeName(firstStem.id1)}-${safeName(firstStem.id2)}-stems.zip`;
-      const output = await createZipWriter(zipName);
+      const filename = `lalal-${safeName(firstStem.id1)}-${safeName(firstStem.id2)}-stems.zip`;
+      const blobWriter = new ZipLib.BlobWriter("application/zip");
+      const zipWriter = new ZipLib.ZipWriter(blobWriter, {
+        level: 0,
+        useWebWorkers: false,
+      });
+
       const summary = [];
 
-      setStatus(output.mode === "stream" ? "Choose ZIP save location..." : "Preparing ZIP...");
+      setStatus(`Creating ZIP with ${stems.length} stem(s)...`);
 
       for (const stem of stems) {
-        const count = await addStemToZip(output.writer, stem);
+        const count = await addStemToZip(zipWriter, stem, ZipLib);
         summary.push(`${safeName(stem.type)}: ${count}`);
       }
 
       setStatus("Finalising ZIP...");
-      await output.close();
+      const blob = await zipWriter.close();
 
-      setStatus(`Saved ZIP: ${summary.join(", ")}`);
+      setStatus("Starting browser download...");
+      saveBlob(blob, filename);
+
+      setStatus(`ZIP ready: ${summary.join(", ")}`);
+
+      try {
+        GM_notification({
+          title: "LALAL ZIP complete",
+          text: summary.join(", "),
+          timeout: 5000,
+        });
+      } catch {}
     } catch (error) {
-      setStatus(`Stopped: ${error && error.message ? error.message : String(error)}`);
+      setStatus(
+        `Error: ${error && error.message ? error.message : String(error)}`,
+      );
+      console.error(error);
     } finally {
       isDownloading = false;
       updatePanel();
@@ -364,7 +385,7 @@
     script.remove();
   }
 
-  function observePerformance() {
+  function observePerformanceOnceAndBuffered() {
     const scan = () => {
       for (const entry of performance.getEntriesByType("resource")) {
         observeUrl(entry.name);
@@ -381,10 +402,8 @@
 
     observer.observe({
       type: "resource",
-      buffered: true
+      buffered: true,
     });
-
-    setInterval(scan, 2000);
   }
 
   window.addEventListener("message", (event) => {
@@ -396,10 +415,12 @@
   if (document.documentElement) {
     installPageHook();
   } else {
-    document.addEventListener("DOMContentLoaded", installPageHook, { once: true });
+    document.addEventListener("DOMContentLoaded", installPageHook, {
+      once: true,
+    });
   }
 
-  observePerformance();
+  observePerformanceOnceAndBuffered();
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", ensurePanel);
