@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         LALAL.AI Stem ZIP Downloader
 // @namespace    extract-lalal-segments
-// @version      1.7.0
+// @version      1.9.1
 // @match        https://lalal.ai/*
 // @match        https://www.lalal.ai/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_notification
+// @grant        unsafeWindow
 // @connect      d.lalal.ai
 // @require      https://cdn.jsdelivr.net/npm/@zip.js/zip.js@2.7.54/dist/zip-full.min.js
 // ==/UserScript==
@@ -94,9 +95,7 @@
     clearButton.style.cursor = "pointer";
     clearButton.style.fontWeight = "700";
 
-    startButton.addEventListener("click", () => {
-      startDownload();
-    });
+    startButton.addEventListener("click", startDownload);
 
     clearButton.addEventListener("click", () => {
       if (isDownloading) return;
@@ -136,8 +135,7 @@
   function observeUrl(rawUrl) {
     if (!rawUrl || typeof rawUrl !== "string") return;
 
-    const cleanUrl = rawUrl.split("#")[0];
-    const match = cleanUrl.match(segmentRegex);
+    const match = rawUrl.match(segmentRegex);
 
     if (!match) return;
 
@@ -200,10 +198,10 @@
     const candidates = [0, 1, ...[...stem.seenNumbers].sort((a, b) => a - b)];
 
     for (const index of [...new Set(candidates)]) {
+      const number = String(index).padStart(stem.width, "0");
       const url = makeSegmentUrl(stem, index);
-      setStatus(
-        `Testing ${safeName(stem.type)} segment-${String(index).padStart(stem.width, "0")}.mp3`,
-      );
+
+      setStatus(`Testing ${safeName(stem.type)} segment-${number}.mp3`);
 
       const response = await requestArrayBuffer(url);
 
@@ -216,6 +214,29 @@
     }
 
     return null;
+  }
+
+  async function chooseZipFile(filename) {
+    const pageWindow =
+      typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+
+    if (!pageWindow.showSaveFilePicker) {
+      throw new Error(
+        "Save location picker is not available. Use Chrome or Edge.",
+      );
+    }
+
+    return await pageWindow.showSaveFilePicker({
+      suggestedName: filename,
+      types: [
+        {
+          description: "ZIP file",
+          accept: {
+            "application/zip": [".zip"],
+          },
+        },
+      ],
+    });
   }
 
   async function addStemToZip(zipWriter, stem, ZipLib) {
@@ -265,36 +286,98 @@
     }
   }
 
-  function saveBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
+  function getStitchScript() {
+    return `#!/usr/bin/env bash
+set -euo pipefail
 
-    link.href = url;
-    link.download = filename;
-    link.style.display = "none";
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "ffmpeg is required. Install it with: brew install ffmpeg"
+  exit 1
+fi
 
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+dirs=("$@")
 
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+if [ "$#" -eq 0 ]; then
+  dirs=()
+
+  for item in */; do
+    [ -d "$item" ] || continue
+    dirs+=("\${item%/}")
+  done
+fi
+
+if [ "\${#dirs[@]}" -eq 0 ]; then
+  echo "No input directories found."
+  echo "Usage: ./stitch.sh [input_dir...]"
+  exit 1
+fi
+
+for input_dir in "\${dirs[@]}"; do
+  if [ ! -d "$input_dir" ]; then
+    echo "Skipping, not a directory: $input_dir"
+    continue
+  fi
+
+  dir_name="$(basename "\${input_dir%/}")"
+  output_name="./\${dir_name}.mp3"
+  list_file="./.\${dir_name}-concat-list.txt"
+
+  rm -f "$list_file"
+
+  found=0
+
+  while IFS= read -r file; do
+    abs_file="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+    printf "file '%s'\\n" "$abs_file" >> "$list_file"
+    found=1
+  done < <(find "$input_dir" -maxdepth 1 -type f -name "*.mp3" | LC_ALL=C sort)
+
+  if [ "$found" -eq 0 ]; then
+    rm -f "$list_file"
+    echo "Skipping, no .mp3 files found in: $input_dir"
+    continue
+  fi
+
+  ffmpeg -hide_banner -y \\
+    -f concat \\
+    -safe 0 \\
+    -i "$list_file" \\
+    -vn \\
+    -c:a libmp3lame \\
+    -b:a 192k \\
+    "$output_name"
+
+  rm -f "$list_file"
+
+  echo "Created: $output_name"
+done
+`;
+  }
+
+  async function addSupportFilesToZip(zipWriter, ZipLib) {
+    const stitchBlob = new Blob([getStitchScript()], {
+      type: "text/x-shellscript",
+    });
+
+    await zipWriter.add("stitch.sh", new ZipLib.BlobReader(stitchBlob), {
+      level: 0,
+    });
   }
 
   async function startDownload() {
     if (isDownloading) return;
 
     ensurePanel();
-    setStatus("Start button pressed.");
 
     const ZipLib = globalThis.zip;
 
     if (
       !ZipLib ||
       !ZipLib.ZipWriter ||
-      !ZipLib.BlobWriter ||
+      !ZipLib.WritableStreamWriter ||
       !ZipLib.BlobReader
     ) {
-      setStatus("zip.js did not load. Refresh the page and try again.");
+      setStatus("zip.js did not load fully. Refresh the page and try again.");
       return;
     }
 
@@ -309,48 +392,72 @@
       return;
     }
 
+    const firstStem = stems[0];
+    const filename = `lalal-${safeName(firstStem.id1)}-${safeName(firstStem.id2)}-stems.zip`;
+
     isDownloading = true;
     updatePanel();
 
+    let writable = null;
+    let zipWriter = null;
+
     try {
-      const firstStem = stems[0];
-      const filename = `lalal-${safeName(firstStem.id1)}-${safeName(firstStem.id2)}-stems.zip`;
-      const blobWriter = new ZipLib.BlobWriter("application/zip");
-      const zipWriter = new ZipLib.ZipWriter(blobWriter, {
-        level: 0,
-        useWebWorkers: false,
-      });
+      setStatus("Choose where to save the ZIP...");
+
+      const fileHandle = await chooseZipFile(filename);
+
+      setStatus("Preparing ZIP file...");
+      writable = await fileHandle.createWritable();
+
+      zipWriter = new ZipLib.ZipWriter(
+        new ZipLib.WritableStreamWriter(writable),
+        {
+          level: 0,
+          bufferedWrite: true,
+          useWebWorkers: false,
+        },
+      );
+
+      window.onbeforeunload = () => "A LALAL ZIP download is still running.";
 
       const summary = [];
-
-      setStatus(`Creating ZIP with ${stems.length} stem(s)...`);
 
       for (const stem of stems) {
         const count = await addStemToZip(zipWriter, stem, ZipLib);
         summary.push(`${safeName(stem.type)}: ${count}`);
       }
 
+      setStatus("Adding stitch.sh...");
+      await addSupportFilesToZip(zipWriter, ZipLib);
+
       setStatus("Finalising ZIP...");
-      const blob = await zipWriter.close();
+      await zipWriter.close();
+      await writable.close();
 
-      setStatus("Starting browser download...");
-      saveBlob(blob, filename);
-
-      setStatus(`ZIP ready: ${summary.join(", ")}`);
+      setStatus(`Saved ZIP: ${summary.join(", ")}`);
 
       try {
         GM_notification({
-          title: "LALAL ZIP complete",
+          title: "LALAL ZIP saved",
           text: summary.join(", "),
           timeout: 5000,
         });
       } catch {}
     } catch (error) {
+      try {
+        if (zipWriter) await zipWriter.close();
+      } catch {}
+
+      try {
+        if (writable) await writable.abort();
+      } catch {}
+
       setStatus(
-        `Error: ${error && error.message ? error.message : String(error)}`,
+        `Stopped: ${error && error.message ? error.message : String(error)}`,
       );
       console.error(error);
     } finally {
+      window.onbeforeunload = null;
       isDownloading = false;
       updatePanel();
     }
